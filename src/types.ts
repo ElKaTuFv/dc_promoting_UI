@@ -5,5 +5,13 @@ export type Msg = { id: number; message: string; world: string; created_at: stri
 export type Profile = { id: number; name: string; level: number; active_at: string | null; nonactive_at: string | null; created_at: string; updated_at: string | null }
 export type ProfileInput = { name: string; level: number; active_at?: string | null; nonactive_at?: string | null }
 export type PromoLog = { id: number; message_id: number; channel_id: number; profile_id: number | null; timestamp: string; next_run: string | null; status: string; created_at: string; updated_at: string }
-export type SendResult = { log_id: number; message_id: number; channel_id: number; next_run: string | null }
+export type SendResult = { log_id: number; status: 'queued'; websocket_path: string }
+export type PromotionCompletion = {
+  type: 'promotion.completed'
+  log_id: number
+  source: 'manual' | 'scheduled' | string
+  status: 'success' | 'error' | 'cancelled' | string
+  message: string
+  data: unknown
+}
 export type LogUpdate = { status_update?: string; clear_schedule?: boolean; disable?: boolean }

@@ -6,6 +6,7 @@ import Messages from './pages/Messages'
 import Profiles from './pages/Profiles'
 import Send from './pages/Send'
 import Logs from './pages/Logs'
+import PromotionRealtime from './PromotionRealtime'
 
 const pages = {
   dashboard: ['Dashboard', Dashboard], send: ['Kirim promosi', Send], logs: ['Log pengiriman', Logs],
@@ -44,7 +45,7 @@ export default function App() {
           ))}
         </nav>
       </aside>
-      <main className="mx-auto w-full max-w-6xl p-4 md:p-8"><Page /></main>
+      <main className="mx-auto w-full max-w-6xl p-4 md:p-8"><PromotionRealtime /><Page /></main>
       <Toaster />
     </div>
   )
