@@ -55,8 +55,8 @@ export const Banner = ({ kind = 'warn', children }: { kind?: 'warn' | 'info' | '
   return <div role={kind === 'error' ? 'alert' : undefined} className={`mb-4 rounded-md border-l-4 px-4 py-3 text-sm ${c}`}>{children}</div>
 }
 
-const sc: Record<string, string> = { sent: 'bg-emerald-500/15 text-emerald-300', queued: 'bg-sky-500/15 text-sky-300', running: 'bg-indigo-400/20 text-indigo-200', cancelled: 'bg-amber-400/15 text-amber-300', disabled: 'bg-raised text-muted', error: 'bg-red-500/15 text-red-300' }
-const lbl: Record<string, string> = { sent: 'Terkirim', queued: 'Antre', running: 'Berjalan', cancelled: 'Dibatalkan', disabled: 'Dinonaktifkan', error: 'Gagal' }
+const sc: Record<string, string> = { sent: 'bg-emerald-500/15 text-emerald-300', queued: 'bg-sky-500/15 text-sky-300', running: 'bg-indigo-400/20 text-indigo-200', cancelled: 'bg-amber-400/15 text-amber-300', waiting: 'bg-amber-400/15 text-amber-300', disabled: 'bg-raised text-muted', error: 'bg-red-500/15 text-red-300' }
+const lbl: Record<string, string> = { sent: 'Terkirim', queued: 'Antre', running: 'Berjalan', cancelled: 'Dibatalkan', waiting: 'Menunggu profil', disabled: 'Dinonaktifkan', error: 'Gagal' }
 export const Badge = ({ s }: { s: string }) => <span className={`inline-flex items-center gap-1.5 whitespace-nowrap rounded-full px-2.5 py-0.5 text-xs font-medium ${sc[s] ?? 'bg-raised text-soft'}`}><span aria-hidden className="size-1.5 rounded-full bg-current" />{lbl[s] ?? s}</span>
 
 export function Tbl({ head, children }: { head: string[]; children: ReactNode }) {

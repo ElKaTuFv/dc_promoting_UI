@@ -1,5 +1,5 @@
 import axios, { type AxiosError, type AxiosResponse } from 'axios'
-import type { Channel, ChannelInput, Envelope, LogUpdate, Msg, Profile, ProfileInput, PromoLog, SendResult } from './types'
+import type { Channel, ChannelInput, Chat, ChatContact, Envelope, ListenerStatus, LogUpdate, Msg, Profile, ProfileInput, PromoLog, SendResult } from './types'
 
 const configuredApiBase = (import.meta.env.VITE_API_BASE_URL ?? '').replace(/\/+$/, '')
 export const apiBaseUrl = (() => {
@@ -12,6 +12,13 @@ export const apiBaseUrl = (() => {
 export function promotionWebSocketUrl(path: string) {
   const base = apiBaseUrl || window.location.origin
   const url = new URL(path, `${base}/`)
+  url.protocol = new URL(base).protocol === 'https:' ? 'wss:' : 'ws:'
+  return url.toString()
+}
+
+export function chatWebSocketUrl(profileId: number) {
+  const base = apiBaseUrl || window.location.origin
+  const url = new URL(`${base}/api/v1/chats/ws/${profileId}`)
   url.protocol = new URL(base).protocol === 'https:' ? 'wss:' : 'ws:'
   return url.toString()
 }
@@ -66,6 +73,18 @@ export const profilesApi = {
   remove: (id: number) => call<null>(http.delete(`/profiles/${id}`)),
   // Menunggu pengguna login di browser backend; bisa lama.
   login: (id: number) => call<{ id: number; name: string }>(http.post(`/profiles/${id}/login`, null, { timeout: 600_000 })),
+  startListener: (id: number) => call<{ id: number; listener_status: ListenerStatus }>(http.post(`/profiles/${id}/listener/start`)),
+  stopListener: (id: number) => call<{ id: number; listener_status: ListenerStatus }>(http.post(`/profiles/${id}/listener/stop`)),
+}
+
+export const chatsApi = {
+  list: (signal?: AbortSignal) => call<Chat[] | null>(http.get('/chats', { signal })).then((r) => r.data ?? []),
+  contacts: (profileId: number, signal?: AbortSignal) =>
+    call<ChatContact[] | null>(http.get(`/chats/profiles/${profileId}/contacts`, { signal })).then((r) => r.data ?? []),
+  conversation: (profileId: number, username: string, signal?: AbortSignal) => {
+    const params = new URLSearchParams({ username })
+    return call<Chat[] | null>(http.get(`/chats/profiles/${profileId}/conversation?${params}`, { signal })).then((r) => r.data ?? [])
+  },
 }
 
 export const promotionApi = {

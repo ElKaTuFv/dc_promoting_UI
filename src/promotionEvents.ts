@@ -3,18 +3,26 @@ import { promotionWebSocketUrl } from './api'
 import { toast } from './ui'
 
 const notificationKey = 'promotion-completion-log-ids'
-const handledIds = new Set<number>()
+const handledResults = new Set<string>()
 
 function readHandledIds() {
   try {
-    const ids: unknown = JSON.parse(localStorage.getItem(notificationKey) ?? '[]')
-    if (Array.isArray(ids)) ids.forEach((id) => { if (typeof id === 'number') handledIds.add(id) })
+    const results: unknown = JSON.parse(localStorage.getItem(notificationKey) ?? '[]')
+    if (Array.isArray(results)) results.forEach((result) => {
+      if (typeof result === 'string') handledResults.add(result)
+      else if (typeof result === 'number') handledResults.add(`${result}:success`)
+    })
   } catch (error) {
     console.warn('Could not read saved promotion notification IDs.', error)
   }
 }
 
 readHandledIds()
+
+export function isWaitingForRetry(log: { status: string; next_run: string | null }, now = Date.now()) {
+  const nextRun = log.next_run ? new Date(log.next_run).getTime() : Number.NaN
+  return log.status === 'cancelled' && Number.isFinite(nextRun) && nextRun > now
+}
 
 export function parsePromotionCompletion(data: string): PromotionCompletion | null {
   let value: unknown
@@ -49,11 +57,12 @@ function eventDetails(event: PromotionCompletion, fallback?: { channel?: string;
 }
 
 export function notifyPromotionCompletion(event: PromotionCompletion, fallback?: { channel?: string; message?: string }) {
-  if (handledIds.has(event.log_id)) return
-  handledIds.add(event.log_id)
-  const ids = [...handledIds].slice(-500)
+  const resultKey = `${event.log_id}:${event.status}`
+  if (handledResults.has(resultKey)) return
+  handledResults.add(resultKey)
+  const results = [...handledResults].slice(-500)
   try {
-    localStorage.setItem(notificationKey, JSON.stringify(ids))
+    localStorage.setItem(notificationKey, JSON.stringify(results))
   } catch (error) {
     console.warn('Could not save promotion notification IDs.', error)
   }

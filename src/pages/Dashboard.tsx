@@ -1,11 +1,15 @@
 import { Async, Badge, PageHead, Tbl, fmt } from '../ui'
 import { useChannels, useLogs, useMessages, useProfiles } from '../hooks'
+import { isWaitingForRetry } from '../promotionEvents'
 
 export default function Dashboard() {
   const ch = useChannels(), ms = useMessages(), pr = useProfiles(), lg = useLogs()
   const stats = [['Channel', ch, 'border-accent'], ['Pesan', ms, 'border-emerald-500'], ['Profil Discord', pr, 'border-fuchsia-500'], ['Log pengiriman', lg, 'border-amber-400']] as const
   const name = (id: number) => ch.data?.find((c) => c.id === id)?.name ?? `#${id}`
-  const cnt = (lg.data ?? []).reduce<Record<string, number>>((a, l) => ({ ...a, [l.status]: (a[l.status] ?? 0) + 1 }), {})
+  const cnt = (lg.data ?? []).reduce<Record<string, number>>((a, l) => {
+    const status = isWaitingForRetry(l) ? 'waiting' : l.status
+    return { ...a, [status]: (a[status] ?? 0) + 1 }
+  }, {})
   return (
     <>
       <PageHead title="Dashboard" sub="Angka dihitung dari data endpoint yang tersedia. Pengiriman terjadwal dijalankan oleh scheduler (Celery Beat) dan worker di backend, bukan oleh halaman ini." />
@@ -22,7 +26,7 @@ export default function Dashboard() {
       <Async q={lg} empty="Belum ada log pengiriman. Mulai dari menu Kirim promosi.">
         <Tbl head={['Waktu', 'Channel', 'Pesan', 'Status', 'Jadwal berikutnya']}>
           {lg.data?.slice(0, 8).map((l) => (
-            <tr key={l.id}><td>{fmt(l.timestamp)}</td><td>{name(l.channel_id)}</td><td>#{l.message_id}</td><td><Badge s={l.status} /></td><td>{fmt(l.next_run)}</td></tr>
+            <tr key={l.id}><td>{fmt(l.timestamp)}</td><td>{name(l.channel_id)}</td><td>#{l.message_id}</td><td><Badge s={isWaitingForRetry(l) ? 'waiting' : l.status} />{isWaitingForRetry(l) && <div className="mt-1 text-xs text-amber-200">Akan dicoba ulang otomatis</div>}</td><td>{fmt(l.next_run)}</td></tr>
           ))}
         </Tbl>
       </Async>

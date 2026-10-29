@@ -6,22 +6,29 @@ import Messages from './pages/Messages'
 import Profiles from './pages/Profiles'
 import Send from './pages/Send'
 import Logs from './pages/Logs'
+import Chats from './pages/Chats'
 import PromotionRealtime from './PromotionRealtime'
+import { loadDiscordEmojis } from './emojiMap'
+import { ChatRealtimeProvider, useChatRealtime } from './ChatRealtime'
 
 const pages = {
   dashboard: ['Dashboard', Dashboard], send: ['Kirim promosi', Send], logs: ['Log pengiriman', Logs],
-  channels: ['Channel', Channels], messages: ['Pesan', Messages], profiles: ['Profil Discord', Profiles],
+  channels: ['Channel', Channels], messages: ['Pesan', Messages], profiles: ['Profil Discord', Profiles], chats: ['Chat', Chats],
 } as const
 type Key = keyof typeof pages
-const groups: [string, Key[]][] = [['Operasional', ['dashboard', 'send', 'logs']], ['Data', ['channels', 'messages', 'profiles']]]
+const groups: [string, Key[]][] = [['Operasional', ['dashboard', 'send', 'logs']], ['Data', ['channels', 'messages', 'profiles', 'chats']]]
 const read = (): Key => (location.hash.slice(1) in pages ? (location.hash.slice(1) as Key) : 'dashboard')
 
-export default function App() {
+function AppShell() {
+  const { hasAnyUnread } = useChatRealtime()
   const [k, setK] = useState<Key>(read)
   useEffect(() => {
     const h = () => setK(read())
     addEventListener('hashchange', h)
     return () => removeEventListener('hashchange', h)
+  }, [])
+  useEffect(() => {
+    void loadDiscordEmojis()
   }, [])
   const Page = pages[k][1]
   return (
@@ -39,6 +46,7 @@ export default function App() {
                 <a key={id} href={`#${id}`} aria-current={id === k ? 'page' : undefined}
                   className={`flex items-center gap-2 whitespace-nowrap rounded-md px-2.5 py-1.5 text-sm transition-colors focus-visible:outline-2 focus-visible:outline-link ${id === k ? 'bg-raised font-semibold text-white' : 'text-muted hover:bg-raised/60 hover:text-body'}`}>
                   <span aria-hidden className="text-lg leading-none opacity-60">#</span>{pages[id][0]}
+                  {id === 'chats' && hasAnyUnread && <span role="img" aria-label="Pesan belum dibaca" className="ml-auto size-2 rounded-full bg-red-500" />}
                 </a>
               ))}
             </div>
@@ -49,4 +57,8 @@ export default function App() {
       <Toaster />
     </div>
   )
+}
+
+export default function App() {
+  return <ChatRealtimeProvider><AppShell /></ChatRealtimeProvider>
 }

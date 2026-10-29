@@ -14,6 +14,18 @@ export default function Profiles() {
   const [del, setDel] = useState<Profile | null>(null)
   const [f, setF] = useState(blank)
   const [err, setErr] = useState<Record<string, string>>({})
+  const listener = useMutation({
+    mutationFn: ({ id, start }: { id: number; start: boolean }) => start ? profilesApi.startListener(id) : profilesApi.stopListener(id),
+    onSuccess: (response) => {
+      const updatedProfile = response.data
+      qc.setQueryData<Profile[]>(['profiles'], (current) =>
+        current?.map((profile) => profile.id === updatedProfile.id
+          ? { ...profile, listener_status: updatedProfile.listener_status }
+          : profile),
+      )
+      toast('success', response.message)
+    },
+  })
   const set = (k: keyof typeof blank) => (e: { target: { value: string } }) => setF({ ...f, [k]: e.target.value })
   const open = (p: Profile | 'new') => {
     setF(p === 'new' ? blank : { name: p.name, level: String(p.level), active: toLocal(p.active_at), nonactive: toLocal(p.nonactive_at) })
@@ -48,13 +60,26 @@ export default function Profiles() {
       <PageHead title="Profil Discord" sub="Akun yang dipakai backend untuk mengirim pesan. Kredensial Discord tidak pernah dimasukkan di sini." action={<Btn onClick={() => open('new')}>Tambah profil</Btn>} />
       <Banner kind="info">“Login Discord” membuka browser di komputer backend dan menunggu Anda menyelesaikan login di sana. Menghapus profil hanya menghapus datanya di dashboard, bukan data browser tersimpan.</Banner>
       {login.isPending && <Banner kind="warn">Menunggu login di browser backend untuk profil <b>{login.variables?.name}</b>… Proses ini bisa memakan waktu. Jangan tutup halaman ini.</Banner>}
+      {listener.isError && (
+        <Banner kind="error">
+          {listener.error.message}
+          {listener.variables?.start && <> Pastikan token profil sudah dikonfigurasi dengan benar di backend; token tidak tersedia di dashboard.</>}
+        </Banner>
+      )}
       <Async q={q} empty="Belum ada profil. Tambahkan profil, lalu jalankan Login Discord.">
-        <Tbl head={['Nama', 'Level', 'Aktif', 'Nonaktif', 'Jadwal', 'Aksi']}>
+        <Tbl head={['Nama', 'Level', 'Listener', 'Aktif', 'Nonaktif', 'Jadwal', 'Aksi']}>
           {q.data?.map((p) => (
             <tr key={p.id}>
-              <td className="font-medium">{p.name}</td><td>{p.level}</td><td>{fmt(p.active_at)}</td><td>{fmt(p.nonactive_at)}</td>
+              <td className="font-medium">{p.name}</td><td>{p.level}</td>
+              <td><span className={p.listener_status === 'running' ? 'text-emerald-300' : 'text-muted'}>{p.listener_status ?? 'stopped'}</span></td>
+              <td>{fmt(p.active_at)}</td><td>{fmt(p.nonactive_at)}</td>
               <td>{p.active_at ? 'Berulang setiap hari' : 'Tanpa jadwal (tidak dipilih otomatis)'}</td>
               <td className="whitespace-nowrap">
+                <Btn disabled={listener.isPending} variant={p.listener_status === 'running' ? 'danger' : 'primary'} onClick={() => listener.mutate({ id: p.id, start: p.listener_status !== 'running' })}>
+                  {listener.isPending && listener.variables?.id === p.id
+                    ? 'Memproses…'
+                    : p.listener_status === 'running' ? 'Stop listener' : 'Start listener'}
+                </Btn>{' '}
                 <Btn disabled={login.isPending} onClick={() => login.mutate(p)}>{login.isPending && login.variables?.id === p.id ? 'Menunggu…' : 'Login Discord'}</Btn>{' '}
                 <Btn variant="ghost" onClick={() => open(p)}>Edit</Btn> <Btn variant="ghost" onClick={() => setDel(p)}>Hapus</Btn>
               </td>

@@ -1,16 +1,16 @@
 import { useEffect, useRef, useState } from 'react'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { promotionApi, promotionWebSocketUrl } from '../api'
-import { useChannels, useMessages, useProfiles } from '../hooks'
+import { useChannels, useLogs, useMessages, useProfiles } from '../hooks'
 import type { PromotionCompletion, SendResult } from '../types'
-import { notifyPromotionCompletion, parsePromotionCompletion } from '../promotionEvents'
+import { isWaitingForRetry, notifyPromotionCompletion, parsePromotionCompletion } from '../promotionEvents'
 import { Banner, Btn, Confirm, Field, PageHead, inp, toast } from '../ui'
 
 type Res = { kind: 'queued'; result: SendResult } | { kind: 'completed'; event: PromotionCompletion } | { kind: 'failed'; message: string }
 
 export default function Send() {
   const qc = useQueryClient()
-  const ms = useMessages(), ch = useChannels(), pr = useProfiles()
+  const ms = useMessages(), ch = useChannels(), pr = useProfiles(), logs = useLogs()
   const [m, setM] = useState(''), [c, setC] = useState(''), [p, setP] = useState('')
   const [ask, setAsk] = useState(false)
   const [res, setRes] = useState<Res | null>(null)
@@ -19,6 +19,12 @@ export default function Send() {
   const msg = ms.data?.find((x) => x.id === +m), chan = ch.data?.find((x) => x.id === +c), prof = pr.data?.find((x) => x.id === +p)
   const low = prof && chan && prof.level < chan.channel_level
   const queued = res?.kind === 'queued' ? res.result : null
+  const completed = res?.kind === 'completed' ? res.event : null
+  const currentLog = completed ? logs.data?.find((log) => log.id === completed.log_id) : undefined
+  const completedStatus = currentLog?.status === 'sent' || currentLog?.status === 'success'
+    ? 'success'
+    : currentLog?.status === 'error' ? 'error' : completed?.status
+  const waitingForRetry = Boolean(currentLog && isWaitingForRetry(currentLog))
 
   useEffect(() => {
     if (!queued) return
@@ -28,8 +34,19 @@ export default function Send() {
     let pollTimer = 0
     let retry = 0
     let checkingLog = false
+    let finishing = false
     const backoff = () => Math.min(1000 * 2 ** retry++, 30_000)
-    const finish = (event: PromotionCompletion) => {
+    const finish = async (event: PromotionCompletion) => {
+      if (stopped || finishing) return
+      finishing = true
+      if (event.status === 'cancelled') {
+        try {
+          const logs = await promotionApi.logs()
+          if (!stopped) qc.setQueryData(['logs'], logs)
+        } catch (error) {
+          if (!stopped) setConnectionIssue(`Belum dapat menyelaraskan status log: ${(error as Error).message}`)
+        }
+      }
       if (stopped) return
       stopped = true
       window.clearTimeout(retryTimer)
@@ -37,14 +54,17 @@ export default function Send() {
       socket?.close()
       notifyPromotionCompletion(event, details.current)
       setRes({ kind: 'completed', event })
-      setConnectionIssue('')
+      if (event.status !== 'cancelled') setConnectionIssue('')
       void qc.invalidateQueries({ queryKey: ['logs'] })
     }
     const reconcile = async () => {
       if (checkingLog || stopped) return
       checkingLog = true
       try {
-        const log = await promotionApi.log(queued.log_id)
+        const logs = await promotionApi.logs()
+        if (!stopped) qc.setQueryData(['logs'], logs)
+        const log = logs.find((item) => item.id === queued.log_id)
+        if (!log) return
         if (log.status === 'sent' || log.status === 'success' || log.status === 'error' || log.status === 'cancelled') {
           finish({
             type: 'promotion.completed',
@@ -76,9 +96,12 @@ export default function Send() {
       }
       socket.onmessage = (message) => {
         const event = parsePromotionCompletion(String(message.data))
-        if (event?.log_id === queued.log_id) finish(event)
+        if (event?.log_id === queued.log_id) void finish(event)
       }
-      socket.onerror = () => setConnectionIssue('Koneksi ke worker terganggu; mencoba kembali dan memeriksa log.')
+      socket.onerror = () => {
+        setConnectionIssue('Koneksi ke worker terganggu; mencoba kembali dan memeriksa log.')
+        socket?.close()
+      }
       socket.onclose = () => {
         if (stopped) return
         setConnectionIssue('Koneksi ke worker terputus; mencoba kembali dan memeriksa log.')
@@ -110,7 +133,7 @@ export default function Send() {
   })
   return (
     <>
-      <PageHead title="Kirim promosi" sub="Permintaan akan masuk antrean backend. Hasil sukses, gagal, atau dibatalkan hanya ditampilkan setelah worker mengonfirmasi." />
+      <PageHead title="Kirim promosi" sub="Permintaan masuk antrean backend. Jika belum ada profil Discord yang memenuhi syarat, scheduler akan mencoba lagi otomatis pada siklus berikutnya." />
       <div className="grid gap-6 lg:grid-cols-2">
         <form className="space-y-4 rounded-lg bg-surface p-5 ring-1 ring-line" onSubmit={(e) => { e.preventDefault(); if (m && c) setAsk(true) }}>
           <Field label="Pesan"><select className={inp} value={m} onChange={(e) => setM(e.target.value)} required><option value="">Pilih pesan…</option>{ms.data?.map((x) => <option key={x.id} value={x.id}>#{x.id} · {x.world} — {x.message.slice(0, 40)}</option>)}</select></Field>
@@ -124,11 +147,13 @@ export default function Send() {
           {connectionIssue && <Banner kind="warn">{connectionIssue}</Banner>}
           {res && (
             res.kind === 'queued'
-              ? <Banner kind="info"><b>Diterima dan masuk antrean.</b> Menunggu konfirmasi worker.<div className="mt-1">Log #{res.result.log_id} · status {res.result.status}</div></Banner>
+              ? <Banner kind="info"><b>Diterima dan masuk antrean; belum berarti sudah terkirim.</b> Menunggu hasil worker.<div className="mt-1">Log #{res.result.log_id} · status {res.result.status}</div></Banner>
               : res.kind === 'failed'
                 ? <Banner kind="error"><b>Permintaan gagal.</b> — {res.message}</Banner>
-                : <Banner kind={res.event.status === 'success' ? 'success' : res.event.status === 'cancelled' ? 'warn' : 'error'}>
-                    <b>{res.event.status === 'success' ? 'Pengiriman berhasil' : res.event.status === 'cancelled' ? 'Pengiriman dibatalkan' : 'Pengiriman gagal'}</b> — {res.event.message}
+                : <Banner kind={completedStatus === 'success' ? 'success' : completedStatus === 'cancelled' ? 'warn' : 'error'}>
+                    {waitingForRetry
+                      ? <><b>Menunggu profil Discord yang memenuhi syarat; akan dicoba ulang otomatis.</b> Scheduler akan mencoba pada siklus berikutnya.<div className="mt-1">Jadwal berikutnya: {currentLog?.next_run ? new Date(currentLog.next_run).toLocaleString('id-ID', { timeZone: 'Asia/Jakarta' }) + ' WIB' : 'menunggu jadwal backend'}</div></>
+                      : <><b>{completedStatus === 'success' ? 'Pengiriman berhasil' : completedStatus === 'cancelled' ? 'Pengiriman dibatalkan' : 'Pengiriman gagal'}</b> — {completedStatus === res.event.status ? res.event.message : completedStatus === 'success' ? 'Scheduler berhasil menyelesaikan pengiriman.' : 'Scheduler melaporkan pengiriman gagal.'}</>}
                     <div className="mt-1">Log #{res.event.log_id}</div>
                   </Banner>
           )}

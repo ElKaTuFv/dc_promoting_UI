@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { promotionApi } from './api'
-import { notifyPromotionCompletion, parsePromotionCompletion, schedulingWebSocketUrl } from './promotionEvents'
+import { isWaitingForRetry, notifyPromotionCompletion, parsePromotionCompletion, schedulingWebSocketUrl } from './promotionEvents'
+import type { PromoLog } from './types'
 import { Banner, Btn } from './ui'
 
 type Connection = 'connecting' | 'connected' | 'reconnecting'
@@ -31,7 +32,7 @@ export default function PromotionRealtime() {
         const logs = await promotionApi.logs()
         if (!stopped) {
           qc.setQueryData(['logs'], logs)
-          setQueuedCount(logs.filter((log) => log.status === 'queued' && log.next_run).length)
+          setQueuedCount(logs.filter((log) => (log.status === 'queued' && log.next_run) || isWaitingForRetry(log)).length)
           setApiIssue('')
         }
       } catch (error) {
@@ -72,10 +73,18 @@ export default function PromotionRealtime() {
         const event = parsePromotionCompletion(String(message.data))
         if (!event || event.source !== 'scheduled') return
         notifyPromotionCompletion(event)
+        const status = event.status === 'success' ? 'sent' : event.status
+        qc.setQueryData<PromoLog[]>(['logs'], (logs) => logs?.map((log) => log.id === event.log_id
+          ? { ...log, status, ...(event.status === 'success' ? { next_run: null } : {}) }
+          : log))
+        void reconcile()
         void qc.invalidateQueries({ queryKey: ['logs'] })
       }
       socket.onerror = () => {
-        if (!stopped) setApiIssue('Koneksi WebSocket scheduler gagal; mencoba menyambung kembali.')
+        if (!stopped) {
+          setApiIssue('Koneksi WebSocket scheduler gagal; mencoba menyambung kembali.')
+          socket?.close()
+        }
       }
       socket.onclose = () => {
         if (stopped) return
@@ -121,7 +130,7 @@ export default function PromotionRealtime() {
         {canRequestPermission && <Btn variant="ghost" onClick={() => { void requestPermission() }}>Aktifkan notifikasi browser</Btn>}
       </div>
       {apiIssue && <Banner kind="warn">{apiIssue} Status terakhir tetap dapat dilihat di Log Pengiriman.</Banner>}
-      {queuedCount > 0 && <p className="mt-2 text-xs text-muted">{queuedCount} log terjadwal masih dalam antrean dengan waktu berikutnya; detail ada di Log Pengiriman.</p>}
+      {queuedCount > 0 && <p className="mt-2 text-xs text-muted">{queuedCount} log menunggu pengiriman terjadwal, termasuk yang menunggu profil Discord aktif; detail ada di Log Pengiriman.</p>}
       {!secure && <p className="mt-2 text-xs text-amber-200">Notifikasi Chrome memerlukan konteks aman (HTTPS; localhost dikecualikan). Buka dashboard melalui HTTPS dan gunakan API HTTPS/WSS.</p>}
       {permission === 'denied' && <p className="mt-2 text-xs text-amber-200">Izin notifikasi ditolak. Ubah izin situs di pengaturan browser jika ingin mengaktifkannya.</p>}
       {permissionIssue && <p role="alert" className="mt-2 text-xs text-amber-200">{permissionIssue}</p>}

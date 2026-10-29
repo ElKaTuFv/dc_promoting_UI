@@ -4,6 +4,7 @@ import { messagesApi } from '../api'
 import { useMessages } from '../hooks'
 import type { Msg } from '../types'
 import { Async, Btn, Confirm, Field, FormModal, PageHead, fmt, inp, toast } from '../ui'
+import MessagePreview from '../components/MessagePreview'
 
 export default function Messages() {
   const qc = useQueryClient()
@@ -50,8 +51,7 @@ export default function Messages() {
       {edit && (
         <FormModal title={edit === 'new' ? 'Tambah pesan' : 'Edit pesan'} onClose={() => setEdit(null)} onSubmit={submit} pending={save.isPending}>
           <Field label="World" error={err.world}><input className={inp} value={f.world} onChange={(e) => setF({ ...f, world: e.target.value })} /></Field>
-          <Field label="Isi pesan" error={err.message}><textarea rows={7} className={inp} value={f.message} onChange={(e) => setF({ ...f, message: e.target.value })} /></Field>
-          <div><span className="text-sm font-medium">Pratinjau</span><pre className="mt-1 min-h-12 whitespace-pre-wrap break-words rounded-md bg-canvas p-3 font-sans text-sm">{f.message || '—'}</pre></div>
+          <MessagePreview textInput={f.message} error={err.message} onTextChange={(message) => setF({ ...f, message })} />
         </FormModal>
       )}
       {del && <Confirm danger title="Hapus pesan?" label="Hapus pesan" pending={rm.isPending} onOk={() => rm.mutate(del.id)} onClose={() => setDel(null)} text={<>Pesan untuk world <b>{del.world}</b> akan dihapus permanen.</>} />}

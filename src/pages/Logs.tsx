@@ -3,6 +3,7 @@ import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { promotionApi } from '../api'
 import { useChannels, useLogs } from '../hooks'
 import type { PromoLog } from '../types'
+import { isWaitingForRetry } from '../promotionEvents'
 import { Async, Badge, Btn, Confirm, PageHead, Tbl, fmt, inp, toast } from '../ui'
 
 type Act = { log: PromoLog; kind: 'disable' | 'clear' | 'status' }
@@ -33,7 +34,7 @@ export default function Logs() {
           {rows.map((l) => (
             <tr key={l.id}>
               <td>{fmt(l.created_at)}</td><td>{name(l.channel_id)} <span className="text-muted">#{l.channel_id}</span></td><td>#{l.message_id}</td><td>{l.profile_id ? `#${l.profile_id}` : '—'}</td>
-              <td><Badge s={l.status} /></td><td>{fmt(l.timestamp)}</td><td>{fmt(l.next_run)}</td>
+              <td><Badge s={isWaitingForRetry(l) ? 'waiting' : l.status} />{isWaitingForRetry(l) && <div className="mt-1 max-w-52 text-xs text-amber-200">Menunggu profil Discord yang memenuhi syarat; akan dicoba ulang otomatis.</div>}</td><td>{fmt(l.timestamp)}</td><td>{fmt(l.next_run)}</td>
               <td className="whitespace-nowrap">
                 <Btn variant="ghost" disabled={l.status === 'disabled'} onClick={() => setAct({ log: l, kind: 'disable' })}>Nonaktifkan</Btn>{' '}
                 <Btn variant="ghost" disabled={!l.next_run} onClick={() => setAct({ log: l, kind: 'clear' })}>Hapus jadwal</Btn>{' '}
