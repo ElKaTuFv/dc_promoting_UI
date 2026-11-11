@@ -16,7 +16,7 @@ const pages = {
   channels: ['Channel', Channels], messages: ['Pesan', Messages], profiles: ['Profil Discord', Profiles], chats: ['Chat', Chats],
 } as const
 type Key = keyof typeof pages
-const groups: [string, Key[]][] = [['Operasional', ['dashboard', 'send', 'logs']], ['Data', ['channels', 'messages', 'profiles', 'chats']]]
+const groups: [string, Key[]][] = [['Operasional', ['dashboard', 'send', 'logs', 'chats']], ['Data', ['channels', 'messages', 'profiles']]]
 const read = (): Key => (location.hash.slice(1) in pages ? (location.hash.slice(1) as Key) : 'dashboard')
 
 function AppShell() {
@@ -32,7 +32,7 @@ function AppShell() {
   }, [])
   const Page = pages[k][1]
   return (
-    <div className="min-h-screen md:flex">
+    <div className={k === 'chats' ? 'flex h-dvh flex-col overflow-hidden md:flex-row' : 'min-h-screen md:flex'}>
       <aside className="bg-ink md:sticky md:top-0 md:h-screen md:w-60 md:shrink-0">
         <div className="flex items-center gap-2.5 px-4 py-3 shadow-[0_1px_0_rgba(0,0,0,.3)] md:h-14">
           <img src="/logo.svg" alt="" className="size-9" />
@@ -53,7 +53,11 @@ function AppShell() {
           ))}
         </nav>
       </aside>
-      <main className="mx-auto w-full max-w-6xl p-4 md:p-8"><PromotionRealtime /><Page /></main>
+      <main className={k === 'chats'
+        ? 'mx-auto flex min-h-0 w-full max-w-6xl flex-1 flex-col overflow-hidden p-4 md:p-8'
+        : 'mx-auto w-full max-w-6xl p-4 md:p-8'}>
+        <PromotionRealtime /><Page />
+      </main>
       <Toaster />
     </div>
   )

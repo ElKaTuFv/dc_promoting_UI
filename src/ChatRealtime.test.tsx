@@ -7,13 +7,15 @@ import type { Chat, ChatContact, Profile } from './types'
 const mocks = vi.hoisted(() => ({
   listProfiles: vi.fn(),
   listChats: vi.fn(),
+  replyStatus: vi.fn(),
   toast: vi.fn(),
 }))
 
 vi.mock('./api', () => ({
   profilesApi: { list: mocks.listProfiles },
-  chatsApi: { list: mocks.listChats },
+  chatsApi: { list: mocks.listChats, replyStatus: mocks.replyStatus },
   chatWebSocketUrl: (profileId: number) => `ws://test/api/v1/chats/ws/${profileId}`,
+  parseApiJson: (data: string) => JSON.parse(data) as unknown,
 }))
 vi.mock('./ui', () => ({ toast: mocks.toast }))
 
@@ -24,6 +26,7 @@ const profiles: Profile[] = [
 ]
 const chat = (overrides: Partial<Chat> = {}): Chat => ({
   id: 1,
+  room_id: null,
   profile_id: 1,
   global_name: 'Alice',
   username: 'alice',
@@ -88,10 +91,16 @@ function Probe() {
       <span data-testid="profile-one-unread">{String(realtime.hasUnread(1, 'alice'))}</span>
       <span data-testid="profile-two-count">{realtime.unreadCount(2, 'alice')}</span>
       <span data-testid="profile-two-read-count">{realtime.unreadCount(2, 'bob')}</span>
+      <span data-testid="profile-two-room-99-count">{realtime.unreadCount(2, 'alice', 99)}</span>
+      <span data-testid="profile-two-room-100-count">{realtime.unreadCount(2, 'alice', 100)}</span>
       <span data-testid="live-conversation">{realtime.mergeConversation(2, 'alice', []).map((message) => message.id).join(',')}</span>
+      <span data-testid="room-99-conversation">{realtime.mergeConversation(2, 'alice', [], 99).map((message) => message.id).join(',')}</span>
+      <span data-testid="profile-two-connection">{realtime.connectionStatus(2)}</span>
+      <span data-testid="reply-task-status">{realtime.replyStatuses['task-1']?.status ?? 'unknown'}</span>
       <span data-testid="notification-permission">{realtime.notificationPermission}</span>
       <button onClick={() => { void realtime.requestBrowserNotifications() }}>Enable desktop notifications</button>
       <button onClick={() => realtime.markConversationRead(1, 'alice', [chat({ status: 'read' })])}>Read profile one</button>
+      <button onClick={() => realtime.registerReplyTask('task-1', 2, 44, 99)}>Register reply task</button>
       <button onClick={() => queryClient.setQueryData<Profile[]>(['profiles'], profiles.map((profile) => profile.id === 1 ? { ...profile, listener_status: 'stopped' } : profile))}>Stop profile one</button>
     </>
   )
@@ -128,6 +137,10 @@ beforeEach(() => {
     chat({ id: 4, profile_id: 2, is_me: true }),
     chat({ id: 5, profile_id: 2, username: 'bob', status: 'read' }),
   ])
+  mocks.replyStatus.mockResolvedValue({
+    task_id: 'task-1', chat_id: 44, profile_id: 2, room_id: 99, status: 'queued',
+    error: null, reply_chat_id: null, created_at: '2026-11-10T10:00:00Z', updated_at: null,
+  })
 })
 
 describe('ChatRealtimeProvider', () => {
@@ -158,6 +171,7 @@ describe('ChatRealtimeProvider', () => {
     const eventChat = chat({ id: 21, profile_id: 2, content: 'Halo dari profile lain', status: 'unread' })
     const event = { type: 'chat.message.created', profile_id: 2, data: eventChat }
     act(() => socket.message({ type: 'chat.connected', profile_id: 2 }))
+    expect(screen.getByTestId('profile-two-connection').textContent).toBe('connected')
     act(() => socket.message({ ...event, data: { ...eventChat, profile_id: 1 } }))
     expect(mocks.toast).not.toHaveBeenCalled()
     act(() => socket.message(event))
@@ -184,6 +198,92 @@ describe('ChatRealtimeProvider', () => {
     act(() => screen.getByRole('button', { name: 'Read profile one' }).click())
     expect(screen.getByTestId('profile-one-unread').textContent).toBe('false')
     expect(screen.getByTestId('global-unread').textContent).toBe('true')
+  })
+
+  it('keeps same-username unread and live messages isolated by room and includes own messages without notifying', async () => {
+    renderProvider()
+    await waitFor(() => expect(MockWebSocket.instances).toHaveLength(2))
+    const socket = MockWebSocket.instances.find((instance) => instance.url.endsWith('/2'))!
+    act(() => socket.message({ type: 'chat.connected', profile_id: 2 }))
+    const room99 = chat({ id: 31, room_id: 99, profile_id: 2, status: 'unread', content: 'Room 99' })
+    const room100 = chat({ id: 32, room_id: 100, profile_id: 2, status: 'unread', content: 'Room 100' })
+    act(() => socket.message({ type: 'chat.message.created', profile_id: 2, data: room99 }))
+    act(() => socket.message({ type: 'chat.message.created', profile_id: 2, data: room100 }))
+    expect(screen.getByTestId('profile-two-room-99-count').textContent).toBe('1')
+    expect(screen.getByTestId('profile-two-room-100-count').textContent).toBe('1')
+    expect(screen.getByTestId('room-99-conversation').textContent).toBe('31')
+    expect(screen.getByTestId('live-conversation').textContent).toBe('31,32')
+
+    act(() => socket.message({
+      type: 'chat.message.created',
+      profile_id: 2,
+      data: chat({ id: 33, room_id: 99, profile_id: 2, username: 'alice', is_me: true, status: 'read' }),
+    }))
+    expect(screen.getByTestId('room-99-conversation').textContent).toBe('31,33')
+    expect(mocks.toast).toHaveBeenCalledTimes(2)
+    expect(MockNotification.instances).toHaveLength(0)
+  })
+
+  it('merges reply task events monotonically, ignores other targets, and restores active tasks', async () => {
+    renderProvider()
+    await waitFor(() => expect(MockWebSocket.instances).toHaveLength(2))
+    const socket = MockWebSocket.instances.find((instance) => instance.url.endsWith('/2'))!
+    act(() => socket.open())
+    act(() => socket.message({ type: 'chat.connected', profile_id: 2 }))
+    const task = {
+      task_id: 'task-1', chat_id: 44, profile_id: 2, room_id: 99,
+      status: 'processing', error: null, reply_chat_id: null,
+      created_at: '2026-11-10T10:00:00Z', updated_at: null,
+    }
+    act(() => socket.message({ type: 'chat.reply.status', profile_id: 2, data: task }))
+    expect(screen.getByTestId('reply-task-status').textContent).toBe('processing')
+    act(() => screen.getByRole('button', { name: 'Register reply task' }).click())
+    await waitFor(() => expect(mocks.replyStatus).toHaveBeenCalledWith('task-1', expect.any(AbortSignal)))
+
+    act(() => socket.message({ type: 'chat.reply.status', profile_id: 1, data: task }))
+    act(() => socket.message({ type: 'chat.reply.status', profile_id: 2, data: { ...task, room_id: 100 } }))
+    expect(screen.getByTestId('reply-task-status').textContent).toBe('processing')
+
+    act(() => socket.message({ type: 'chat.reply.status', profile_id: 2, data: { ...task, status: 'queued' } }))
+    expect(screen.getByTestId('reply-task-status').textContent).toBe('processing')
+    act(() => socket.message({ type: 'chat.reply.status', profile_id: 2, data: { ...task, status: 'sent', reply_chat_id: 77 } }))
+    expect(screen.getByTestId('reply-task-status').textContent).toBe('sent')
+    act(() => socket.message({ type: 'chat.reply.status', profile_id: 2, data: task }))
+    expect(screen.getByTestId('reply-task-status').textContent).toBe('sent')
+
+    act(() => socket.disconnect())
+    expect(screen.getByTestId('reply-task-status').textContent).toBe('sent')
+    expect(screen.getByTestId('profile-two-connection').textContent).toBe('reconnecting')
+  })
+
+  it('recovers nonterminal reply tasks after reconnect without treating disconnect as failure', async () => {
+    const view = renderProvider()
+    await waitFor(() => expect(MockWebSocket.instances).toHaveLength(2))
+    const first = MockWebSocket.instances.find((instance) => instance.url.endsWith('/2'))!
+    act(() => screen.getByRole('button', { name: 'Register reply task' }).click())
+    expect(mocks.replyStatus).not.toHaveBeenCalled()
+
+    act(() => first.open())
+    act(() => first.message({ type: 'chat.connected', profile_id: 2 }))
+    await waitFor(() => expect(mocks.replyStatus).toHaveBeenCalledTimes(1))
+    const processing = {
+      task_id: 'task-1', chat_id: 44, profile_id: 2, room_id: 99, status: 'processing',
+      error: null, reply_chat_id: null, created_at: '2026-11-10T10:00:00Z', updated_at: null,
+    }
+    act(() => first.message({ type: 'chat.reply.status', profile_id: 2, data: processing }))
+    expect(screen.getByTestId('reply-task-status').textContent).toBe('processing')
+    act(() => first.disconnect())
+    expect(screen.getByTestId('reply-task-status').textContent).toBe('processing')
+    await new Promise((resolve) => setTimeout(resolve, 1_100))
+    const reconnected = MockWebSocket.instances.filter((instance) => instance.url.endsWith('/2')).at(-1)!
+    expect(reconnected).not.toBe(first)
+    act(() => reconnected.open())
+    act(() => reconnected.message({ type: 'chat.connected', profile_id: 2 }))
+    await waitFor(() => expect(mocks.replyStatus).toHaveBeenCalledTimes(2))
+    expect(screen.getByTestId('reply-task-status').textContent).toBe('processing')
+    view.unmount()
+    expect(first.close).not.toHaveBeenCalled()
+    expect(reconnected.close).toHaveBeenCalled()
   })
 
   it('requests browser notification permission only after a user action', async () => {
