@@ -2,7 +2,7 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useRef, use
 import { useQueryClient } from '@tanstack/react-query'
 import { chatWebSocketUrl, chatsApi } from './api'
 import { useProfiles } from './hooks'
-import type { Chat, ChatConnectedEvent, ChatContact, ChatMessageCreatedEvent, Profile } from './types'
+import type { Chat, ChatConnectedEvent, ChatContact, ChatMessageCreatedEvent, ChatMessageUpdatedEvent, Profile, RoomId } from './types'
 import { toast } from './ui'
 
 type ConversationUnread = Record<string, number[]>
@@ -13,45 +13,61 @@ type SocketEntry = {
   notified: boolean
 }
 type ChatRealtimeValue = {
-  hasUnread: (profileId: number, username: string) => boolean
+  hasUnread: (profileId: number, roomId: RoomId) => boolean
   hasAnyUnread: boolean
-  unreadCount: (profileId: number, username: string) => number
+  unreadCount: (profileId: number, roomId: RoomId) => number
   liveVersion: number
   notificationPermission: NotificationPermission | 'unsupported'
   requestBrowserNotifications: () => Promise<void>
-  markConversationRead: (profileId: number, username: string, chats: Chat[]) => void
+  markConversationRead: (profileId: number, roomId: RoomId, chats: Chat[]) => void
   mergeContacts: (profileId: number, contacts: ChatContact[]) => ChatContact[]
-  mergeConversation: (profileId: number, username: string, chats: Chat[]) => Chat[]
+  mergeConversation: (profileId: number, roomId: RoomId, chats: Chat[]) => Chat[]
 }
 
 const ChatRealtimeContext = createContext<ChatRealtimeValue | null>(null)
-const conversationKey = (profileId: number, username: string) => JSON.stringify([profileId, username])
+const conversationKey = (profileId: number, roomId: RoomId) => JSON.stringify([profileId, roomId])
+const roomKey = (roomId: RoomId) => roomId
 const sentAt = (chat: Chat) => Date.parse(chat.timestamp ?? chat.created_at) || 0
 const isLater = (chat: Chat, other: Chat) => sentAt(chat) > sentAt(other) || (sentAt(chat) === sentAt(other) && chat.id >= other.id)
+const preferLatestRecord = (candidate: Chat, current: Chat) => {
+  const candidateUpdatedAt = Date.parse(candidate.updated_at ?? '') || 0
+  const currentUpdatedAt = Date.parse(current.updated_at ?? '') || 0
+  return candidateUpdatedAt >= currentUpdatedAt
+}
 const mergeLiveContacts = (profileId: number, contacts: ChatContact[], liveChats: Map<string, Map<number, Chat>>, restLatest: Map<string, Chat>) => {
-  const merged = new Map(contacts.map((contact) => [contact.username, contact]))
-  const latestByContact = new Map<string, Chat>()
+  const merged = new Map(contacts.flatMap((contact) => contact.room_id === null ? [] : [[roomKey(contact.room_id), contact] as const]))
+  const latestByRoom = new Map<string, Chat>()
   const contactsWithIncoming = new Set<string>()
   for (const [key, messages] of liveChats) {
-    const [id, username] = JSON.parse(key) as [number, string]
+    const [id, roomId] = JSON.parse(key) as [number, RoomId]
     if (id !== profileId) continue
     for (const chat of messages.values()) {
-      if (!chat.is_me) contactsWithIncoming.add(username)
-      const current = latestByContact.get(username)
-      if (!current || isLater(chat, current)) latestByContact.set(username, chat)
+      if (chat.room_id == null) continue
+      const keyForRoom = roomKey(roomId)
+      if (!chat.is_me) contactsWithIncoming.add(keyForRoom)
+      const current = latestByRoom.get(keyForRoom)
+      if (!current || isLater(chat, current)) latestByRoom.set(keyForRoom, chat)
     }
   }
   for (const [key, chat] of restLatest) {
-    const [id, username] = JSON.parse(key) as [number, string]
+    const [id, roomId] = JSON.parse(key) as [number, RoomId]
     if (id !== profileId) continue
-    const current = latestByContact.get(username)
-    if (!current || isLater(chat, current)) latestByContact.set(username, chat)
+    if (chat.room_id == null) continue
+    const keyForRoom = roomKey(roomId)
+    const current = latestByRoom.get(keyForRoom)
+    if (!current || isLater(chat, current)) latestByRoom.set(keyForRoom, chat)
   }
-  for (const [username, latest] of latestByContact) {
-    const existing = merged.get(username)
-    if (!existing && latest.is_me && !contactsWithIncoming.has(username)) continue
+  for (const [keyForRoom, latest] of latestByRoom) {
+    const existing = merged.get(keyForRoom)
+    if (!existing && latest.is_me && !contactsWithIncoming.has(keyForRoom)) continue
+    if (latest.room_id == null) continue
     if (!existing || isLater(latest, existing.last_chat)) {
-      merged.set(username, { username, global_name: latest.global_name || existing?.global_name || username, last_chat: latest })
+      merged.set(keyForRoom, {
+        global_name: existing?.global_name || latest.global_name,
+        username: existing?.username || latest.username,
+        room_id: latest.room_id,
+        last_chat: latest,
+      })
     }
   }
   return Array.from(merged.values()).sort((a, b) => sentAt(b.last_chat) - sentAt(a.last_chat) || b.last_chat.id - a.last_chat.id)
@@ -65,7 +81,8 @@ const isChat = (value: unknown): value is Chat => {
     && typeof chat.username === 'string'
     && typeof chat.is_me === 'boolean'
     && (chat.content === null || typeof chat.content === 'string')
-    && (chat.status === null || chat.status === 'read' || chat.status === 'unread')
+    && (chat.room_id === null || typeof chat.room_id === 'string')
+    && (chat.status === null || (typeof chat.status === 'string' && ['read', 'unread', 'queued', 'processing', 'sent', 'failed'].includes(chat.status)))
     && (chat.timestamp === null || typeof chat.timestamp === 'string')
     && typeof chat.created_at === 'string'
     && (chat.updated_at === null || typeof chat.updated_at === 'string')
@@ -78,8 +95,20 @@ const isChatMessageCreatedEvent = (value: unknown): value is ChatMessageCreatedE
   if (!value || typeof value !== 'object') return false
   const event = value as Partial<ChatMessageCreatedEvent>
   return event.type === 'chat.message.created'
-    && Number.isSafeInteger(event.profile_id)
+    && (event.profile_id === undefined || Number.isSafeInteger(event.profile_id))
     && isChat(event.data)
+}
+const isChatMessageUpdatedEvent = (value: unknown): value is ChatMessageUpdatedEvent => {
+  if (!value || typeof value !== 'object') return false
+  const event = value as Partial<ChatMessageUpdatedEvent>
+  return event.type === 'chat.message.updated'
+    && (event.profile_id === undefined || Number.isSafeInteger(event.profile_id))
+    && isChat(event.data)
+}
+const upsertChat = (chats: Chat[], chat: Chat) => {
+  const index = chats.findIndex((item) => item.id === chat.id)
+  const next = index < 0 ? [...chats, chat] : chats.map((item) => item.id === chat.id ? chat : item)
+  return next.sort((a, b) => sentAt(a) - sentAt(b) || a.id - b.id)
 }
 
 export function ChatRealtimeProvider({ children }: { children: ReactNode }) {
@@ -93,7 +122,8 @@ export function ChatRealtimeProvider({ children }: { children: ReactNode }) {
   const unreadRef = useRef<ConversationUnread>({})
   const sockets = useRef(new Map<number, SocketEntry>())
   const desiredProfiles = useRef(new Map<number, Profile>())
-  const seenIds = useRef(new Set<number>())
+  const connectedProfiles = useRef(new Set<number>())
+  const createdEventIds = useRef(new Set<string>())
   const revision = useRef(0)
   const syncSequence = useRef(0)
   const syncAbort = useRef<AbortController | null>(null)
@@ -160,9 +190,8 @@ export function ChatRealtimeProvider({ children }: { children: ReactNode }) {
       const latestFromRest = new Map<string, Chat>()
       for (const chat of chats) {
         if (!isChat(chat)) continue
-        seenIds.current.add(chat.id)
-        if (chat.profile_id === null) continue
-        const key = conversationKey(chat.profile_id, chat.username)
+        if (chat.profile_id === null || chat.room_id == null) continue
+        const key = conversationKey(chat.profile_id, chat.room_id)
         const latest = latestFromRest.get(key)
         if (!latest || isLater(chat, latest)) latestFromRest.set(key, chat)
         if (chat.is_me || chat.status !== 'unread') continue
@@ -203,23 +232,24 @@ export function ChatRealtimeProvider({ children }: { children: ReactNode }) {
     }
   }, [publishUnread, queryClient])
 
-  const mergeConversation = useCallback((profileId: number, username: string, chats: Chat[]) => {
-    const key = conversationKey(profileId, username)
-    const combined = [...chats]
-    const ids = new Set(chats.map((chat) => chat.id))
+  const mergeConversation = useCallback((profileId: number, roomId: RoomId, chats: Chat[]) => {
+    const key = conversationKey(profileId, roomId)
+    let combined = [...chats]
     for (const [id, chat] of liveChats.current.get(key) ?? []) {
-      if (!ids.has(id)) combined.push(chat)
+      const index = combined.findIndex((item) => item.id === id)
+      if (index < 0) combined = [...combined, chat]
+      else if (preferLatestRecord(chat, combined[index])) combined = combined.map((item) => item.id === id ? chat : item)
     }
-    return combined
+    return combined.sort((a, b) => sentAt(a) - sentAt(b) || a.id - b.id)
   }, [])
 
   const mergeContacts = useCallback((profileId: number, contacts: ChatContact[]) => {
     return mergeLiveContacts(profileId, contacts, liveChats.current, restLatest.current)
   }, [])
 
-  const markConversationRead = useCallback((profileId: number, username: string, chats: Chat[]) => {
-    const key = conversationKey(profileId, username)
-    const readIds = new Set(chats.filter((chat) => chat.status !== 'unread').map((chat) => chat.id))
+  const markConversationRead = useCallback((profileId: number, roomId: RoomId, chats: Chat[]) => {
+    const key = conversationKey(profileId, roomId)
+    const readIds = new Set(chats.filter((chat) => !chat.is_me && chat.status === 'read').map((chat) => chat.id))
     const readRevision = ++revision.current
     readAt.current.set(key, readRevision)
     const pending = liveUnread.current.get(key)
@@ -264,6 +294,7 @@ export function ChatRealtimeProvider({ children }: { children: ReactNode }) {
         entry.socket.onclose = null
         entry.socket.close()
       }
+      connectedProfiles.current.delete(profileId)
       sockets.current.delete(profileId)
     }
 
@@ -302,30 +333,54 @@ export function ChatRealtimeProvider({ children }: { children: ReactNode }) {
           }
           if (isChatConnectedEvent(message)) {
             if (message.profile_id !== profileId) console.warn(`Unexpected chat.connected profile for socket ${profileId}`)
-            return
-          }
-          if (!isChatMessageCreatedEvent(message)) {
-            if (message && typeof message === 'object' && (message as { type?: unknown }).type === 'chat.message.created') {
-              console.warn(`Malformed chat.message.created event for profile ${profileId}`)
+            else {
+              connectedProfiles.current.add(profileId)
+              void queryClient.invalidateQueries({ queryKey: ['conversation', profileId] })
             }
             return
           }
-          if (message.profile_id !== profileId || message.data.profile_id !== profileId || message.data.is_me) return
-          const chat = message.data
-          if (seenIds.current.has(chat.id)) return
-          seenIds.current.add(chat.id)
+          let chatEvent: ChatMessageCreatedEvent | ChatMessageUpdatedEvent | null = null
+          if (isChatMessageCreatedEvent(message)) chatEvent = message
+          else if (isChatMessageUpdatedEvent(message)) chatEvent = message
+          if (!chatEvent) {
+            if (message && typeof message === 'object' && ['chat.message.created', 'chat.message.updated'].includes(String((message as { type?: unknown }).type))) {
+              console.warn(`Malformed chat WebSocket event for profile ${profileId}`)
+            }
+            return
+          }
+          if ((chatEvent.profile_id !== undefined && chatEvent.profile_id !== profileId)
+            || (chatEvent.data.profile_id !== profileId)
+            || chatEvent.data.room_id == null) return
+          const created = chatEvent.type === 'chat.message.created'
+          const chat = chatEvent.data
+          const eventRoomId = chat.room_id
+          if (eventRoomId == null) return
+          const eventId = JSON.stringify([profileId, chat.id])
+          const wasCreatedEventSeen = createdEventIds.current.has(eventId)
+          if (created) createdEventIds.current.add(eventId)
+          const updated = chatEvent.type === 'chat.message.updated'
 
-          const key = conversationKey(profileId, chat.username)
+          const key = conversationKey(profileId, eventRoomId)
           const eventRevision = ++revision.current
           const conversationMessages = liveChats.current.get(key) ?? new Map<number, Chat>()
           conversationMessages.set(chat.id, chat)
           liveChats.current.set(key, conversationMessages)
+          queryClient.setQueryData<Chat[]>(['conversation', profileId, eventRoomId], (current) =>
+            upsertChat(current ?? [], chat),
+          )
           setLiveVersion((version) => version + 1)
-          if (chat.status === 'unread') {
+          if (!chat.is_me && (created || updated)) {
             const unreadMessages = liveUnread.current.get(key) ?? new Map<number, { chat: Chat; revision: number }>()
-            unreadMessages.set(chat.id, { chat, revision: eventRevision })
-            liveUnread.current.set(key, unreadMessages)
-            const next = { ...unreadRef.current, [key]: Array.from(unreadMessages.keys()) }
+            if (chat.status === 'unread') unreadMessages.set(chat.id, { chat, revision: eventRevision })
+            else unreadMessages.delete(chat.id)
+            if (unreadMessages.size) liveUnread.current.set(key, unreadMessages)
+            else liveUnread.current.delete(key)
+            const next = { ...unreadRef.current }
+            const ids = new Set(next[key] ?? [])
+            if (chat.status === 'unread') ids.add(chat.id)
+            else ids.delete(chat.id)
+            if (ids.size) next[key] = Array.from(ids)
+            else delete next[key]
             publishUnread(next)
           }
 
@@ -334,10 +389,12 @@ export function ChatRealtimeProvider({ children }: { children: ReactNode }) {
               mergeContacts(profileId, contacts ?? []),
             )
           }
-          const profileName = profilesById.current.get(profileId)?.name ?? `Profil ${profileId}`
-          const preview = chat.content?.trim() || 'Pesan tanpa teks'
-          toast('success', `${profileName} · ${chat.global_name || chat.username}: ${preview.slice(0, 120)}`)
-          notifyOutsideApp(profileName, chat)
+          if (created && !chat.is_me && !wasCreatedEventSeen) {
+            const profileName = profilesById.current.get(profileId)?.name ?? `Profil ${profileId}`
+            const preview = chat.content?.trim() || 'Pesan tanpa teks'
+            toast('success', `${profileName} · ${chat.global_name || chat.username}: ${preview.slice(0, 120)}`)
+            notifyOutsideApp(profileName, chat)
+          }
         }
         socket.onerror = () => {
           if (sockets.current.get(profileId) !== entry || !desiredProfiles.current.has(profileId)) return
@@ -349,6 +406,7 @@ export function ChatRealtimeProvider({ children }: { children: ReactNode }) {
         }
         socket.onclose = () => {
           if (sockets.current.get(profileId) !== entry || !desiredProfiles.current.has(profileId)) return
+          connectedProfiles.current.delete(profileId)
           entry.socket = null
           scheduleReconnect(profileId, entry)
         }
@@ -376,6 +434,7 @@ export function ChatRealtimeProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => () => {
     desiredProfiles.current.clear()
+    connectedProfiles.current.clear()
     syncSequence.current += 1
     syncAbort.current?.abort()
     for (const entry of sockets.current.values()) {
@@ -392,9 +451,9 @@ export function ChatRealtimeProvider({ children }: { children: ReactNode }) {
   }, [])
 
   const value = useMemo<ChatRealtimeValue>(() => ({
-    hasUnread: (profileId, username) => !!unread[conversationKey(profileId, username)]?.length,
+    hasUnread: (profileId, roomId) => !!unread[conversationKey(profileId, roomId)]?.length,
     hasAnyUnread: Object.values(unread).some((ids) => ids.length > 0),
-    unreadCount: (profileId, username) => unread[conversationKey(profileId, username)]?.length ?? 0,
+    unreadCount: (profileId, roomId) => unread[conversationKey(profileId, roomId)]?.length ?? 0,
     liveVersion,
     notificationPermission,
     requestBrowserNotifications,

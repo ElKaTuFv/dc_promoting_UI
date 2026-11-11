@@ -1,5 +1,5 @@
 import axios, { type AxiosError, type AxiosResponse } from 'axios'
-import type { Channel, ChannelInput, Chat, ChatContact, Envelope, ListenerStatus, LogUpdate, Msg, Profile, ProfileInput, PromoLog, SendResult } from './types'
+import type { Channel, ChannelInput, Chat, ChatContact, Envelope, ListenerStatus, LogUpdate, Msg, Profile, ProfileInput, PromoLog, RoomId, SendResult } from './types'
 
 const configuredApiBase = (import.meta.env.VITE_API_BASE_URL ?? '').replace(/\/+$/, '')
 export const apiBaseUrl = (() => {
@@ -81,10 +81,14 @@ export const chatsApi = {
   list: (signal?: AbortSignal) => call<Chat[] | null>(http.get('/chats', { signal })).then((r) => r.data ?? []),
   contacts: (profileId: number, signal?: AbortSignal) =>
     call<ChatContact[] | null>(http.get(`/chats/profiles/${profileId}/contacts`, { signal })).then((r) => r.data ?? []),
-  conversation: (profileId: number, username: string, signal?: AbortSignal) => {
-    const params = new URLSearchParams({ username })
-    return call<Chat[] | null>(http.get(`/chats/profiles/${profileId}/conversation?${params}`, { signal })).then((r) => r.data ?? [])
-  },
+  conversation: (profileId: number, roomId: RoomId, signal?: AbortSignal) =>
+    call<Chat[] | null>(http.get(`/chats/profiles/${profileId}/conversation`, { params: { room_id: roomId }, signal })).then((r) => r.data ?? []),
+  reply: (chatId: number, reply: string, specifiedReply: boolean) =>
+    call<Chat | { message: Chat }>(http.post(`/chats/${chatId}/reply`, { reply, specified_reply: specifiedReply })).then((r) => {
+      const message = 'message' in r.data ? r.data.message : r.data
+      if (!message || !Number.isSafeInteger(message.id)) throw new ApiError('Backend tidak mengembalikan pesan balasan yang valid.', 'error')
+      return message
+    }),
 }
 
 export const promotionApi = {

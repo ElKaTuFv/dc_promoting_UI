@@ -11,13 +11,41 @@ beforeEach(() => {
 })
 
 describe('chatsApi', () => {
-  it('URL-encodes the exact username in the conversation query', async () => {
+  it('requests a conversation by room_id without a username parameter', async () => {
     get.mockResolvedValue({ data: { status: 'success', message: 'ok', data: [] } })
-    await chatsApi.conversation(12, 'name+tag &value')
+    await chatsApi.conversation(12, 'room+tag &value')
     expect(get).toHaveBeenCalledWith(
-      '/chats/profiles/12/conversation?username=name%2Btag+%26value',
-      { signal: undefined },
+      '/chats/profiles/12/conversation',
+      { params: { room_id: 'room+tag &value' }, signal: undefined },
     )
+  })
+
+  it('preserves a large Discord room ID as a string in the conversation query', async () => {
+    get.mockResolvedValue({ data: { status: 'success', message: 'ok', data: [] } })
+    const roomId = '1562315127397548042'
+    await chatsApi.conversation(12, roomId)
+    expect(get).toHaveBeenCalledWith(
+      '/chats/profiles/12/conversation',
+      { params: { room_id: '1562315127397548042' }, signal: undefined },
+    )
+  })
+
+  it('returns contact room IDs as strings without converting large IDs', async () => {
+    const contacts = [{
+      room_id: '1562315127397548042',
+      last_chat: { id: 32, room_id: '1562315127397548042' },
+    }]
+    get.mockResolvedValue({ data: { status: 'success', message: 'ok', data: contacts } })
+    const response = await chatsApi.contacts(12)
+    expect(response[0].room_id).toBe('1562315127397548042')
+    expect(response[0].last_chat.room_id).toBe('1562315127397548042')
+  })
+
+  it('posts a reply to the chat ID and returns the queued message from data.message', async () => {
+    const replyMessage = { id: 32, status: 'queued' }
+    post.mockResolvedValue({ data: { status: 'success', message: 'ok', data: { message: replyMessage } } })
+    await expect(chatsApi.reply(19, 'Halo', true)).resolves.toEqual(replyMessage)
+    expect(post).toHaveBeenCalledWith('/chats/19/reply', { reply: 'Halo', specified_reply: true })
   })
 
   it('rejects an error envelope even when the HTTP request succeeds', async () => {

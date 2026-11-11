@@ -25,6 +25,7 @@ const profiles: Profile[] = [
 const chat = (overrides: Partial<Chat> = {}): Chat => ({
   id: 1,
   profile_id: 1,
+  room_id: 'alice',
   global_name: 'Alice',
   username: 'alice',
   is_me: false,
@@ -89,9 +90,11 @@ function Probe() {
       <span data-testid="profile-two-count">{realtime.unreadCount(2, 'alice')}</span>
       <span data-testid="profile-two-read-count">{realtime.unreadCount(2, 'bob')}</span>
       <span data-testid="live-conversation">{realtime.mergeConversation(2, 'alice', []).map((message) => message.id).join(',')}</span>
+      <span data-testid="live-chat-status">{realtime.mergeConversation(2, 'alice', [chat({ id: 40, profile_id: 2, is_me: true, status: 'queued' })])[0]?.status}</span>
       <span data-testid="notification-permission">{realtime.notificationPermission}</span>
       <button onClick={() => { void realtime.requestBrowserNotifications() }}>Enable desktop notifications</button>
       <button onClick={() => realtime.markConversationRead(1, 'alice', [chat({ status: 'read' })])}>Read profile one</button>
+      <button onClick={() => realtime.markConversationRead(2, 'alice', [chat({ id: 40, profile_id: 2, is_me: true, status: 'queued' })])}>Read queued reply</button>
       <button onClick={() => queryClient.setQueryData<Profile[]>(['profiles'], profiles.map((profile) => profile.id === 1 ? { ...profile, listener_status: 'stopped' } : profile))}>Stop profile one</button>
     </>
   )
@@ -100,8 +103,9 @@ function Probe() {
 function renderProvider() {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   queryClient.setQueryData<ChatContact[]>(['chatContacts', 2], [{
-    username: 'alice',
     global_name: 'Alice',
+    username: 'alice',
+    room_id: 'alice',
     last_chat: chat({ id: 20, profile_id: 2, status: 'read', content: 'Preview sebelumnya' }),
   }])
   const result = render(<QueryClientProvider client={queryClient}><ChatRealtimeProvider><Probe /></ChatRealtimeProvider></QueryClientProvider>)
@@ -158,6 +162,7 @@ describe('ChatRealtimeProvider', () => {
     const eventChat = chat({ id: 21, profile_id: 2, content: 'Halo dari profile lain', status: 'unread' })
     const event = { type: 'chat.message.created', profile_id: 2, data: eventChat }
     act(() => socket.message({ type: 'chat.connected', profile_id: 2 }))
+    expect(screen.getByTestId('live-conversation').textContent).toBe('')
     act(() => socket.message({ ...event, data: { ...eventChat, profile_id: 1 } }))
     expect(mocks.toast).not.toHaveBeenCalled()
     act(() => socket.message(event))
@@ -168,7 +173,7 @@ describe('ChatRealtimeProvider', () => {
     expect(MockNotification.instances[0].title).toBe('Profile two · Alice')
     expect(MockNotification.instances[0].options?.body).toBe('Halo dari profile lain')
     expect(screen.getByTestId('live-conversation').textContent).toBe('21')
-    expect(view.queryClient.getQueryData<Chat[]>(['conversation', 2, 'alice'])).toBeUndefined()
+    expect(view.queryClient.getQueryData<Chat[]>(['conversation', 2, 'alice'])).toEqual([eventChat])
     expect(view.queryClient.getQueryData<ChatContact[]>(['chatContacts', 2])?.[0].last_chat.content).toBe('Halo dari profile lain')
 
     act(() => socket.message(event))
@@ -184,6 +189,74 @@ describe('ChatRealtimeProvider', () => {
     act(() => screen.getByRole('button', { name: 'Read profile one' }).click())
     expect(screen.getByTestId('profile-one-unread').textContent).toBe('false')
     expect(screen.getByTestId('global-unread').textContent).toBe('true')
+  })
+
+  it('notifies about a created unread message even if REST sync already returned its ID', async () => {
+    const eventChat = chat({ id: 31, profile_id: 2, content: 'Sudah ada di REST', status: 'unread' })
+    mocks.listChats.mockResolvedValue([eventChat])
+    const view = renderProvider()
+    await waitFor(() => expect(MockWebSocket.instances).toHaveLength(2))
+    const socket = MockWebSocket.instances.find((instance) => instance.url.endsWith('/2'))!
+    act(() => socket.open())
+    await waitFor(() => expect(mocks.listChats).toHaveBeenCalledTimes(2))
+
+    act(() => socket.message({ type: 'chat.message.created', profile_id: 2, data: eventChat }))
+    expect((await screen.findByTestId('profile-two-count')).textContent).toBe('1')
+    expect(mocks.toast).toHaveBeenCalledWith('success', expect.stringContaining('Sudah ada di REST'))
+    act(() => socket.message({ type: 'chat.message.created', profile_id: 2, data: eventChat }))
+    expect(mocks.toast).toHaveBeenCalledTimes(1)
+    view.unmount()
+  })
+
+  it('upserts created messages without duplication and applies updated delivery status events', async () => {
+    const view = renderProvider()
+    await waitFor(() => expect(MockWebSocket.instances).toHaveLength(2))
+    const socket = MockWebSocket.instances.find((instance) => instance.url.endsWith('/2'))!
+    const responseMessage = chat({ id: 40, profile_id: 2, is_me: true, status: 'queued', content: 'Reply', created_at: '2026-10-29T02:00:00Z' })
+    view.queryClient.setQueryData<Chat[]>(['conversation', 2, 'alice'], [responseMessage])
+
+    act(() => socket.message({ type: 'chat.message.created', profile_id: 2, data: responseMessage }))
+    expect(view.queryClient.getQueryData<Chat[]>(['conversation', 2, 'alice'])).toHaveLength(1)
+    act(() => screen.getByRole('button', { name: 'Read queued reply' }).click())
+    expect(view.queryClient.getQueryData<Chat[]>(['conversation', 2, 'alice'])?.[0].status).toBe('queued')
+    expect(screen.getByTestId('live-chat-status').textContent).toBe('queued')
+
+    act(() => socket.message({
+      type: 'chat.message.updated',
+      profile_id: 2,
+      data: { ...responseMessage, status: 'processing' },
+    }))
+    expect(view.queryClient.getQueryData<Chat[]>(['conversation', 2, 'alice'])?.[0].status).toBe('processing')
+    expect(screen.getByTestId('live-chat-status').textContent).toBe('processing')
+
+    act(() => socket.message({
+      type: 'chat.message.updated',
+      profile_id: 2,
+      data: { ...responseMessage, status: 'sent' },
+    }))
+    expect(view.queryClient.getQueryData<Chat[]>(['conversation', 2, 'alice'])?.[0].status).toBe('sent')
+    expect(screen.getByTestId('live-chat-status').textContent).toBe('sent')
+    view.unmount()
+  })
+
+  it('adds updated messages missing from the conversation cache and keeps room ID strings', async () => {
+    const view = renderProvider()
+    await waitFor(() => expect(MockWebSocket.instances).toHaveLength(2))
+    const socket = MockWebSocket.instances.find((instance) => instance.url.endsWith('/2'))!
+    const roomId = '1562315127397548042'
+    const updatedMessage = chat({
+      id: 41,
+      profile_id: 2,
+      room_id: roomId,
+      is_me: true,
+      status: 'failed',
+      content: 'Reply failed',
+    })
+    act(() => socket.message({ type: 'chat.message.updated', profile_id: 2, data: updatedMessage }))
+
+    expect(view.queryClient.getQueryData<Chat[]>(['conversation', 2, roomId])).toEqual([updatedMessage])
+    expect(view.queryClient.getQueryData<Chat[]>(['conversation', 2, '1562315127397548042'])).toHaveLength(1)
+    view.unmount()
   })
 
   it('requests browser notification permission only after a user action', async () => {

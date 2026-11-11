@@ -1,8 +1,10 @@
 export type Envelope<T> = { status: 'success' | 'error' | 'cancelled'; message: string; data: T }
-export type ChatStatus = 'read' | 'unread' | null
+export type RoomId = string
+export type ChatStatus = 'read' | 'unread' | 'queued' | 'processing' | 'sent' | 'failed' | null
 export interface Chat {
   id: number
   profile_id: number | null
+  room_id: string | null
   global_name: string
   username: string
   is_me: boolean
@@ -13,8 +15,9 @@ export interface Chat {
   updated_at: string | null
 }
 export interface ChatContact {
-  username: string
   global_name: string
+  username: string
+  room_id: string | null
   last_chat: Chat
 }
 export interface ChatConnectedEvent {
@@ -23,7 +26,12 @@ export interface ChatConnectedEvent {
 }
 export interface ChatMessageCreatedEvent {
   type: 'chat.message.created'
-  profile_id: number
+  profile_id?: number
+  data: Chat
+}
+export interface ChatMessageUpdatedEvent {
+  type: 'chat.message.updated'
+  profile_id?: number
   data: Chat
 }
 export interface ApiResponse<T> {
